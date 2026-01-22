@@ -436,12 +436,22 @@ class KernelBuilder:
                         out_instrs.append(instr)
 
             # Try a handful of randomized schedules (compile-time only) and pick the shortest.
+            #
+            # NOTE: This is a dev-time tradeoff. Large search counts noticeably slow down running
+            # the Python tests (kernel compilation dominates). You can increase the search via env
+            # vars if you are chasing the last few cycles.
             import random as _random
 
-            # Explore a few randomized tie-break schedules (compile-time only).
+            n_fast_trials = int(os.environ.get("KERNEL_SCHED_FAST_TRIALS", "1024"))
+            n_generic_trials = int(os.environ.get("KERNEL_SCHED_GENERIC_TRIALS", "16"))
+            if n_fast_trials < 1:
+                n_fast_trials = 1
+            if n_generic_trials < 0:
+                n_generic_trials = 0
+
             best = None
             best_len = 10**18
-            for seed in range(1024):
+            for seed in range(n_fast_trials):
                 cand = schedule_fast(_random.Random(seed))
                 if len(cand) < best_len:
                     best = cand
@@ -455,7 +465,7 @@ class KernelBuilder:
                 ("store", "load", "valu", "flow", "alu"),
                 ("valu", "store", "load", "flow", "alu"),
             ):
-                for seed in range(16):
+                for seed in range(n_generic_trials):
                     cand = build_schedule(
                         engine_order=engine_order,
                         mem_ahead_compute_behind=True,
@@ -832,15 +842,22 @@ class KernelBuilder:
             elif r in (2, 13):
                 # depth-2: idx in [3..6] -> path j in [0..3]
                 # Select between nodes 3..6 without loads.
-                # Let j = path (0..3) with bits (b1 b0). Then:
-                #   node = n3 + b0*(n4-n3) + b1*(n5-n3) + (b0*b1)*(n6-n5-n4+n3)
-                ops.append({"valu": [("&", t2, path, v_mask1)]})
-                ops.append({"valu": [("multiply_add", t1, v_d2_1, t2, v_d2_0)]})
-                ops.append({"valu": [(">>", t2, path, v_one)]})
-                ops.append({"valu": [("multiply_add", t1, v_d2_2, t2, t1)]})
-                ops.append({"valu": [("==", t2, path, v_three)]})
-                ops.append({"valu": [("multiply_add", t1, v_d2_3, t2, t1)]})
-                ops.append({"valu": [("^", val, val, t1)]})
+                # Mapping: path 0->n3, 1->n4, 2->n5, 3->n6.
+                # Use flow vselects to reduce valu-slot pressure.
+
+                # cond0 = path & 1
+                ops.append({"valu": [("&", t1, path, v_mask1)]})
+                # left_node = (cond0 ? n4 : n3)
+                ops.append({"flow": [("vselect", t2, t1, v_node4, v_node3)]})
+                # left_xor = val ^ left_node
+                ops.append({"valu": [("^", t2, val, t2)]})
+                # right_node = (cond0 ? n6 : n5)  (dest overwrites cond0 after read)
+                ops.append({"flow": [("vselect", t1, t1, v_node6, v_node5)]})
+                # right_xor = val ^ right_node
+                # cond1 = path & 2 (non-zero iff path in {2,3})
+                ops.append({"valu": [("^", t1, val, t1), ("&", val, path, v_two)]})
+                # val = (cond1 ? right_xor : left_xor)
+                ops.append({"flow": [("vselect", val, val, t1, t2)]})
             else:
                 # Gather node values from the current depth's contiguous block:
                 # addr = forest_values_p + base(depth) + path
