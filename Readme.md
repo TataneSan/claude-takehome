@@ -21,4 +21,4 @@ Run `python tests/submission_tests.py` to see which thresholds you pass.
 
 ## Current score of this submission
 
-Rn, I'm at a score of 1482 cycles. Not too bad :D
+Rn, I'm at a score of 1462 cycles. Not too bad :D
